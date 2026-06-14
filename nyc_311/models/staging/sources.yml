@@ -1,0 +1,14 @@
+version: 2
+
+sources:
+  - name: raw
+    database: NYC_311_DB
+    schema: RAW
+    quoting:
+      identifier: true
+    tables:
+      - name: stg_311_raw
+        description: >
+          Raw NYC 311 service request data landed from CSV by the Python
+          ingestion script. All columns are STRING — type casting happens
+          in the staging model.
