@@ -1,0 +1,91 @@
+# CI pipeline for the nyc_311 dbt project.
+# Runs on every push to main and every pull request targeting main so that
+# broken models or failed data tests are caught before they reach production.
+
+name: dbt CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  dbt-test:
+    runs-on: ubuntu-latest
+
+    # Apply the working directory to every run step so we don't repeat it
+    defaults:
+      run:
+        working-directory: nyc_311
+
+    # Expose Snowflake credentials as environment variables.
+    # GitHub Actions automatically masks these values in all log output.
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      # Path where the private key file will be written in the next step
+      SNOWFLAKE_PRIVATE_KEY_PATH: /tmp/snowflake_key.pem
+
+    steps:
+      # Check out the repository so the workflow can read our dbt project files
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Pin to Python 3.11 for a reproducible build environment
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # dbt-snowflake pulls in dbt-core as a dependency automatically
+      - name: Install dbt-snowflake
+        run: pip install dbt-snowflake
+        # working-directory default does not affect pip, included for clarity
+
+      # The private key is stored as a multi-line GitHub Secret.
+      # We write it to a temp file and lock permissions so only the runner
+      # user can read it. SNOWFLAKE_PRIVATE_KEY_PATH points profiles.yml here.
+      - name: Write Snowflake private key
+        working-directory: /tmp
+        run: |
+          printf '%s' "${{ secrets.SNOWFLAKE_PRIVATE_KEY }}" > snowflake_key.pem
+          chmod 600 snowflake_key.pem
+
+      # profiles.yml lives in ~/.dbt on a developer's machine but does not
+      # exist on the GitHub Actions runner. We generate it here from env vars
+      # so no credentials are ever committed to the repository.
+      - name: Create dbt profiles.yml
+        working-directory: /tmp
+        run: |
+          mkdir -p ~/.dbt
+          cat > ~/.dbt/profiles.yml << EOF
+          nyc_311:
+            target: dev
+            outputs:
+              dev:
+                type: snowflake
+                account: ${SNOWFLAKE_ACCOUNT}
+                user: ${SNOWFLAKE_USER}
+                private_key_path: ${SNOWFLAKE_PRIVATE_KEY_PATH}
+                database: ${SNOWFLAKE_DATABASE}
+                schema: ${SNOWFLAKE_SCHEMA}
+                warehouse: ${SNOWFLAKE_WAREHOUSE}
+                role: ${SNOWFLAKE_ROLE}
+                threads: 4
+          EOF
+
+      # Installs any packages declared in packages.yml (none yet, but safe to
+      # run now so the step is already in place when packages are added later)
+      - name: Install dbt packages
+        run: dbt deps
+
+      # Runs every test defined in schema.yml against the live Snowflake tables.
+      # A non-zero exit code fails the workflow and blocks the PR from merging.
+      # Tests marked severity: warn produce output but do not fail the run.
+      - name: Run dbt tests
+        run: dbt test
